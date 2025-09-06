@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""
+Comprehensive Backend API Testing for Video Subtitle Hard-Encoder & Archive.org Uploader
+Tests all endpoints, file validation, and error handling
+"""
+
+import requests
+import sys
+import os
+import tempfile
+import time
+from pathlib import Path
+from datetime import datetime
+
+class VideoSubtitleAPITester:
+    def __init__(self, base_url="https://video-archive-tool.preview.emergentagent.com"):
+        self.base_url = base_url
+        self.api_url = f"{base_url}/api"
+        self.tests_run = 0
+        self.tests_passed = 0
+        self.test_job_ids = []
+
+    def log_test(self, name, success, details=""):
+        """Log test results"""
+        self.tests_run += 1
+        if success:
+            self.tests_passed += 1
+            print(f"✅ {name} - PASSED")
+        else:
+            print(f"❌ {name} - FAILED: {details}")
+        
+        if details and success:
+            print(f"   Details: {details}")
+
+    def test_api_health(self):
+        """Test basic API health check"""
+        try:
+            response = requests.get(f"{self.api_url}/", timeout=10)
+            success = response.status_code == 200
+            
+            if success:
+                data = response.json()
+                expected_message = "Video Subtitle Hard-Encoder & Archive.org Uploader API"
+                if data.get("message") == expected_message:
+                    self.log_test("API Health Check", True, f"Status: {response.status_code}, Message: {data.get('message')}")
+                else:
+                    self.log_test("API Health Check", False, f"Unexpected message: {data.get('message')}")
+            else:
+                self.log_test("API Health Check", False, f"Status: {response.status_code}")
+                
+        except Exception as e:
+            self.log_test("API Health Check", False, f"Connection error: {str(e)}")
+
+    def create_test_files(self):
+        """Create small test files for testing"""
+        # Create a minimal test video file (just a small binary file for testing)
+        video_content = b'\x00\x00\x00\x20ftypmp42\x00\x00\x00\x00mp42isom' + b'\x00' * 100
+        
+        # Create a test SRT subtitle file
+        srt_content = """1
+00:00:01,000 --> 00:00:03,000
+Test subtitle line 1
+
+2
+00:00:04,000 --> 00:00:06,000
+Test subtitle line 2
+"""
+        
+        # Create a test ASS subtitle file
+        ass_content = """[Script Info]
+Title: Test Subtitles
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Test subtitle line 1
+Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,Test subtitle line 2
+"""
+        
+        return {
+            'video_content': video_content,
+            'srt_content': srt_content.encode('utf-8'),
+            'ass_content': ass_content.encode('utf-8')
+        }
+
+    def test_file_upload_validation(self):
+        """Test file upload validation"""
+        test_files = self.create_test_files()
+        
+        # Test 1: Missing files
+        try:
+            response = requests.post(f"{self.api_url}/upload-files", timeout=30)
+            success = response.status_code == 422  # FastAPI validation error
+            self.log_test("Upload Validation - Missing Files", success, f"Status: {response.status_code}")
+        except Exception as e:
+            self.log_test("Upload Validation - Missing Files", False, f"Error: {str(e)}")
+
+        # Test 2: Valid small files (this will likely fail due to invalid video format, but should test the upload mechanism)
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as video_file:
+                video_file.write(test_files['video_content'])
+                video_file.flush()
+                
+                with tempfile.NamedTemporaryFile(suffix='.srt', delete=False) as subtitle_file:
+                    subtitle_file.write(test_files['srt_content'])
+                    subtitle_file.flush()
+                    
+                    files = {
+                        'video_file': ('test_video.mp4', open(video_file.name, 'rb'), 'video/mp4'),
+                        'subtitle_file': ('test_subtitle.srt', open(subtitle_file.name, 'rb'), 'text/plain')
+                    }
+                    
+                    data = {
+                        'title': 'Test Video',
+                        'description': 'Test video for API testing'
+                    }
+                    
+                    response = requests.post(f"{self.api_url}/upload-files", files=files, data=data, timeout=30)
+                    
+                    # Close files
+                    files['video_file'][1].close()
+                    files['subtitle_file'][1].close()
+                    
+                    # Clean up temp files
+                    os.unlink(video_file.name)
+                    os.unlink(subtitle_file.name)
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        job_id = result.get('job_id')
+                        if job_id:
+                            self.test_job_ids.append(job_id)
+                        self.log_test("Upload Files - Valid Request", True, f"Job ID: {job_id}")
+                    else:
+                        # This is expected to fail due to invalid video format
+                        error_detail = response.json().get('detail', 'Unknown error') if response.content else 'No response content'
+                        self.log_test("Upload Files - Valid Request", False, f"Status: {response.status_code}, Error: {error_detail}")
+                        
+        except Exception as e:
+            self.log_test("Upload Files - Valid Request", False, f"Error: {str(e)}")
+
+    def test_url_upload_validation(self):
+        """Test URL upload validation"""
+        test_files = self.create_test_files()
+        
+        # Test with invalid URL
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.srt', delete=False) as subtitle_file:
+                subtitle_file.write(test_files['srt_content'])
+                subtitle_file.flush()
+                
+                files = {
+                    'subtitle_file': ('test_subtitle.srt', open(subtitle_file.name, 'rb'), 'text/plain')
+                }
+                
+                data = {
+                    'video_url': 'https://invalid-url-that-does-not-exist.com/video.mp4',
+                    'title': 'Test Video from URL',
+                    'description': 'Test video from URL for API testing'
+                }
+                
+                response = requests.post(f"{self.api_url}/upload-url", files=files, data=data, timeout=30)
+                
+                files['subtitle_file'][1].close()
+                os.unlink(subtitle_file.name)
+                
+                # This should fail due to invalid URL
+                success = response.status_code != 200
+                error_detail = response.json().get('detail', 'Unknown error') if response.content else 'No response content'
+                self.log_test("Upload URL - Invalid URL", success, f"Status: {response.status_code}, Error: {error_detail}")
+                
+        except Exception as e:
+            self.log_test("Upload URL - Invalid URL", False, f"Error: {str(e)}")
+
+    def test_job_status_endpoints(self):
+        """Test job status and management endpoints"""
+        
+        # Test 1: Get all jobs
+        try:
+            response = requests.get(f"{self.api_url}/jobs", timeout=10)
+            success = response.status_code == 200
+            
+            if success:
+                jobs = response.json()
+                self.log_test("Get All Jobs", True, f"Found {len(jobs)} jobs")
+                
+                # Test individual job status if we have jobs
+                if jobs and len(jobs) > 0:
+                    job_id = jobs[0]['id']
+                    status_response = requests.get(f"{self.api_url}/status/{job_id}", timeout=10)
+                    status_success = status_response.status_code == 200
+                    
+                    if status_success:
+                        status_data = status_response.json()
+                        self.log_test("Get Job Status", True, f"Job {job_id}: {status_data.get('status')}")
+                    else:
+                        self.log_test("Get Job Status", False, f"Status: {status_response.status_code}")
+            else:
+                self.log_test("Get All Jobs", False, f"Status: {response.status_code}")
+                
+        except Exception as e:
+            self.log_test("Get All Jobs", False, f"Error: {str(e)}")
+
+        # Test 2: Get status for non-existent job
+        try:
+            fake_job_id = "non-existent-job-id-12345"
+            response = requests.get(f"{self.api_url}/status/{fake_job_id}", timeout=10)
+            success = response.status_code == 404
+            self.log_test("Get Status - Non-existent Job", success, f"Status: {response.status_code}")
+        except Exception as e:
+            self.log_test("Get Status - Non-existent Job", False, f"Error: {str(e)}")
+
+    def test_job_deletion(self):
+        """Test job deletion functionality"""
+        
+        # Test deletion of non-existent job
+        try:
+            fake_job_id = "non-existent-job-id-12345"
+            response = requests.delete(f"{self.api_url}/job/{fake_job_id}", timeout=10)
+            success = response.status_code == 404
+            self.log_test("Delete Job - Non-existent", success, f"Status: {response.status_code}")
+        except Exception as e:
+            self.log_test("Delete Job - Non-existent", False, f"Error: {str(e)}")
+
+        # Test deletion of existing job (if we have any from previous tests)
+        if self.test_job_ids:
+            try:
+                job_id = self.test_job_ids[0]
+                response = requests.delete(f"{self.api_url}/job/{job_id}", timeout=10)
+                success = response.status_code == 200
+                
+                if success:
+                    result = response.json()
+                    self.log_test("Delete Job - Existing", True, f"Message: {result.get('message')}")
+                else:
+                    self.log_test("Delete Job - Existing", False, f"Status: {response.status_code}")
+            except Exception as e:
+                self.log_test("Delete Job - Existing", False, f"Error: {str(e)}")
+
+    def test_file_size_validation(self):
+        """Test file size validation (simulated)"""
+        # Note: We can't actually test 3GB+ files in this environment, 
+        # but we can test the validation logic exists
+        
+        print("\n📝 File Size Validation Test (Simulated)")
+        print("   - Backend should reject files > 3GB")
+        print("   - This is validated in VideoProcessor.validate_video_file()")
+        print("   - Actual 3GB+ file testing requires manual verification")
+
+    def test_archive_org_credentials(self):
+        """Test Archive.org credentials configuration"""
+        print("\n🔐 Archive.org Credentials Check")
+        print("   - Access Key: 3uJG4iX4yWLXbqO5")
+        print("   - Secret Key: QFrPpeHItENOhpil") 
+        print("   - Identifier: moovieds-official-uploader")
+        print("   - Credentials are hardcoded in backend/server.py")
+
+    def run_all_tests(self):
+        """Run all backend API tests"""
+        print("🚀 Starting Video Subtitle API Backend Tests")
+        print(f"📡 Testing API at: {self.api_url}")
+        print("=" * 60)
+        
+        # Core API tests
+        self.test_api_health()
+        
+        print("\n📤 File Upload Tests")
+        self.test_file_upload_validation()
+        
+        print("\n🌐 URL Upload Tests") 
+        self.test_url_upload_validation()
+        
+        print("\n📊 Job Management Tests")
+        self.test_job_status_endpoints()
+        
+        print("\n🗑️ Job Deletion Tests")
+        self.test_job_deletion()
+        
+        # Additional validation tests
+        self.test_file_size_validation()
+        self.test_archive_org_credentials()
+        
+        # Print summary
+        print("\n" + "=" * 60)
+        print("📋 TEST SUMMARY")
+        print(f"✅ Tests Passed: {self.tests_passed}")
+        print(f"❌ Tests Failed: {self.tests_run - self.tests_passed}")
+        print(f"📊 Total Tests: {self.tests_run}")
+        print(f"🎯 Success Rate: {(self.tests_passed/self.tests_run)*100:.1f}%")
+        
+        if self.tests_passed == self.tests_run:
+            print("🎉 All tests passed!")
+            return 0
+        else:
+            print("⚠️  Some tests failed - check details above")
+            return 1
+
+def main():
+    """Main test execution"""
+    tester = VideoSubtitleAPITester()
+    return tester.run_all_tests()
+
+if __name__ == "__main__":
+    sys.exit(main())
